@@ -13,6 +13,6 @@ This repository provides the official implementation for the paper: [Quantum-Enh
    - classical_resnet.py: Training ResNet.
   
 ## **3. Evaluation**: key_rank & bayesian folder
-   - quanvh_keyrank.py: Rank all last round subkeys by using a trained QuanvH.
-   - conv_keyrank.py: Rank all last round subkeys by using a trained Conv.
-   - resnet_keyrank.py: Rank all last round subkeys by using a trained ResNet.
+   - [model_name]_keyrank.py: Rank all last round subkeys by using a trained model.
+   - [model_name]_bayesian_singleround.py: Recover the last round key by using one neural distinguisher without any round extension.
+   - [model_name]_bayesian: Recover 10-round subkey by using two neural distinguishers based on the Gohr's Bayesian key search technique.
