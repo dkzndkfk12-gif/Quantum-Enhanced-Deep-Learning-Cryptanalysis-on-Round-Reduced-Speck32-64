@@ -11,8 +11,11 @@ This repository provides the official implementation for the paper: [Quantum-Enh
    - quanvh.py: Training QuavnH.
    - classical_conv.py: Training Conv.
    - classical_resnet.py: Training ResNet.
+
+## **3. Wrong-key response**: wkr folder
+   - [model_name]_wkr.py: Get data of mu and sigma for wrong-key response.
   
-## **3. Evaluation**: key_rank & bayesian folder
+## **4. Evaluation**: key_rank & bayesian folder
    - [model_name]_keyrank.py: Rank all last round subkeys by using a trained model.
    - [model_name]_bayesian_singleround.py: Recover the last round key by using one neural distinguisher without any round extension.
    - [model_name]_bayesian: Recover 10-round subkey by using two neural distinguishers based on the Gohr's Bayesian key search technique.
