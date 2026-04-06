@@ -19,3 +19,5 @@ This repository provides the official implementation for the paper: [Quantum-Enh
    - [model_name]_keyrank.py: Rank all last round subkeys by using a trained model.
    - [model_name]_bayesian_singleround.py: Recover the last round key by using one neural distinguisher without any round extension.
    - [model_name]_bayesian: Recover 10-round subkey by using two neural distinguishers based on the Gohr's Bayesian key search technique.
+
+The users may need to change each parameter in the codes for their own purposes.
