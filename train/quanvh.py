@@ -30,7 +30,6 @@ def training_data_gen():
 
 X, Y = training_data_gen()
 
-# 출력 형식은 최대한 유지
 X_train, X_val, X_test = X[:7680, :], X[7680:10240, :], X[10240:, :]
 Y_train, Y_val, Y_test = Y[:7680], Y[7680:10240], Y[10240:]
 
@@ -77,7 +76,6 @@ def quantum_filter(inputs, weights):
         qml.CNOT(wires=[2, 1])
         qml.CNOT(wires=[1, 0])
 
-    # 논문 설명대로 designated qubit 1개 측정
     return qml.expval(qml.PauliZ(0))
 
 
@@ -93,10 +91,8 @@ class QCNNClassifier(nn.Module):
         super().__init__()
         self.num_filters = num_filters
 
-        # filter 4개, 각 filter는 (4 layers, 8 params)
         self.qweights = nn.Parameter(0.05 * torch.randn(num_filters, NUM_LAYERS, 8))
 
-        # 논문 구조에 맞춰 양자 출력은 (batch, 4, 16) -> flatten -> 64
         self.fc1 = nn.Linear(num_filters * 16, hidden_dim)
         self.relu = nn.ReLU()
         self.bn1 = nn.BatchNorm1d(hidden_dim)
@@ -115,10 +111,8 @@ class QCNNClassifier(nn.Module):
                 [quantum_filter(col, self.qweights[f]) for col in cols],
                 dim=0
             )
-            # qvals shape = (batch * 16,)
             filter_outputs.append(qvals.view(batch_size, 16))
 
-        # conv_output shape = (batch, 4, 16)
         conv_output = torch.stack(filter_outputs, dim=1)
 
         out = conv_output.reshape(batch_size, -1)   # (batch, 64)
@@ -199,7 +193,6 @@ for epoch in range(num_epochs):
         best_loss = val_loss
         best_state = copy.deepcopy(model.state_dict())
 
-# best checkpoint 복원
 if best_state is not None:
     model.load_state_dict(best_state)
 
