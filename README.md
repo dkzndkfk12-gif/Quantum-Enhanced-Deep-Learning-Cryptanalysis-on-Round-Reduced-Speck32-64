@@ -1,4 +1,4 @@
-# Quantum-Enhanced-Deep-Learning-Cryptanalysis-on-Round-Reduced-Speck32-64
+# Quantum-Enhanced Deep Learning Cryptanalysis on Round-Reduced Speck32-64
 
 This repository provides the official implementation for the paper: [Quantum-Enhanced Deep Learning Cryptanalysis on Round-Reduced Speck32/64].
 
