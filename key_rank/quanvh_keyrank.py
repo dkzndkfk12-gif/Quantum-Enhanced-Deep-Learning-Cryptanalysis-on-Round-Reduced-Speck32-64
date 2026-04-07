@@ -1,0 +1,239 @@
+import os
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+
+import math
+import numpy as np
+import pennylane as qml
+import torch
+import torch.nn as nn
+
+MODEL_PATH = 'quanvh_r5.pth'
+OUTPUT_PATH = 'quanvh_keyrank.npz'
+R_TRAIN = 5
+DIFF = (0x0040, 0x0000)
+NUM_PAIRS = 10
+N_ITER = 1
+KEY_BATCH_SIZE = 32
+SAMPLE_BATCH_SIZE = 256
+SEED = 1234
+DEVICE = 'cpu'
+
+WORD_SIZE = 16
+MASK = (1 << WORD_SIZE) - 1
+ALPHA = 7
+BETA = 2
+NUM_QUBITS = 4
+NUM_LAYERS = 4
+NUM_FILTERS = 4
+HIDDEN_DIM = 64
+
+
+def _try_import_speck1():
+    try:
+        import Speck1 as sp
+        need = ['expand_key', 'encrypt', 'dec_one_round', 'convert_to_binary']
+        if all(hasattr(sp, x) for x in need):
+            return sp
+    except Exception:
+        pass
+    return None
+
+
+SP = _try_import_speck1()
+
+
+def rol(x, r):
+    x = np.asarray(x, dtype=np.uint16)
+    return ((x << r) & MASK) | (x >> (WORD_SIZE - r))
+
+
+def ror(x, r):
+    x = np.asarray(x, dtype=np.uint16)
+    return (x >> r) | ((x << (WORD_SIZE - r)) & MASK)
+
+
+def enc_one_round(p, k):
+    x, y = p
+    x = ror(x, ALPHA)
+    x = (x + y) & MASK
+    x = x ^ np.asarray(k, dtype=np.uint16)
+    y = rol(y, BETA)
+    y = y ^ x
+    return x.astype(np.uint16), y.astype(np.uint16)
+
+
+def dec_one_round_local(c, k):
+    x, y = c
+    y = y ^ x
+    y = ror(y, BETA)
+    x = x ^ np.asarray(k, dtype=np.uint16)
+    x = (x - y) & MASK
+    x = rol(x, ALPHA)
+    return x.astype(np.uint16), y.astype(np.uint16)
+
+
+def expand_key_local(k, rounds):
+    k = [int(v) & MASK for v in np.asarray(k, dtype=np.uint16)]
+    ks = [0] * rounds
+    ks[0] = k[-1]
+    l = list(reversed(k[:-1]))
+    for i in range(rounds - 1):
+        j = i % len(l)
+        l[j], ks[i + 1] = enc_one_round((np.uint16(l[j]), np.uint16(ks[i])), np.uint16(i))
+        l[j], ks[i + 1] = int(l[j]), int(ks[i + 1])
+    return np.asarray(ks, dtype=np.uint16)
+
+
+def encrypt_local(p, ks):
+    x = np.asarray(p[0], dtype=np.uint16)
+    y = np.asarray(p[1], dtype=np.uint16)
+    for k in np.asarray(ks, dtype=np.uint16):
+        x, y = enc_one_round((x, y), k)
+    return x, y
+
+
+def convert_to_binary_local(words):
+    words = [np.asarray(w, dtype=np.uint16).reshape(-1) for w in words]
+    n = words[0].shape[0]
+    X = np.zeros((4 * WORD_SIZE, n), dtype=np.uint8)
+    for i in range(4 * WORD_SIZE):
+        wi = i // WORD_SIZE
+        off = WORD_SIZE - 1 - (i % WORD_SIZE)
+        X[i] = (words[wi] >> off) & 1
+    return X.T
+
+
+def expand_key(k, rounds):
+    return SP.expand_key(k, rounds) if SP else expand_key_local(k, rounds)
+
+
+def encrypt(p, ks):
+    return SP.encrypt(p, ks) if SP else encrypt_local(p, ks)
+
+
+def dec_one_round(c, k):
+    return SP.dec_one_round(c, k) if SP else dec_one_round_local(c, k)
+
+
+def convert_to_binary(words):
+    return SP.convert_to_binary(words) if SP else convert_to_binary_local(words)
+
+
+dev = qml.device('lightning.qubit', wires=NUM_QUBITS)
+
+
+@qml.qnode(dev, interface='torch', diff_method='adjoint')
+def quantum_filter(inputs, weights):
+    for i in range(NUM_QUBITS):
+        qml.RX(inputs[i], wires=i)
+    for l in range(NUM_LAYERS):
+        for i in range(NUM_QUBITS):
+            qml.RX(weights[l, i], wires=i)
+        for i in range(NUM_QUBITS):
+            qml.RZ(weights[l, 4 + i], wires=i)
+        qml.CNOT(wires=[3, 2])
+        qml.CNOT(wires=[2, 1])
+        qml.CNOT(wires=[1, 0])
+    return qml.expval(qml.PauliZ(0))
+
+
+class QCNNClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.qweights = nn.Parameter(0.05 * torch.randn(NUM_FILTERS, NUM_LAYERS, 8))
+        self.fc1 = nn.Linear(NUM_FILTERS * 16, HIDDEN_DIM)
+        self.relu = nn.ReLU()
+        self.bn1 = nn.BatchNorm1d(HIDDEN_DIM)
+        self.fc2 = nn.Linear(HIDDEN_DIM, 1)
+
+    def forward(self, x):
+        b = x.size(0)
+        cols = (x * math.pi).transpose(1, 2).contiguous().view(-1, 4)
+        qs = []
+        for f in range(NUM_FILTERS):
+            q = torch.stack([quantum_filter(col, self.qweights[f]) for col in cols], dim=0)
+            qs.append(q.view(b, 16))
+        x = torch.stack(qs, dim=1).reshape(b, -1)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.bn1(x)
+        return self.fc2(x).squeeze(1)
+
+
+def load_model(path, device):
+    model = QCNNClassifier().to(device)
+    state = torch.load(path, map_location=device)
+    if isinstance(state, dict) and 'state_dict' in state:
+        state = state['state_dict']
+    if all(k.startswith('module.') for k in state.keys()):
+        state = {k[7:]: v for k, v in state.items()}
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    return model
+
+
+def score_keys(model, c0l, c0r, c1l, c1r, keys, sample_batch_size, device):
+    t = len(c0l)
+    k = len(keys)
+    keys2 = keys[:, None].astype(np.uint16)
+
+    u0l, u0r = dec_one_round((np.broadcast_to(c0l, (k, t)), np.broadcast_to(c0r, (k, t))), keys2)
+    u1l, u1r = dec_one_round((np.broadcast_to(c1l, (k, t)), np.broadcast_to(c1r, (k, t))), keys2)
+
+    X = convert_to_binary((u0l.reshape(-1), u0r.reshape(-1), u1l.reshape(-1), u1r.reshape(-1)))
+    X = X.reshape(k * t, 4, 16).astype(np.float32)
+
+    logits = []
+    with torch.no_grad():
+        for s in range(0, len(X), sample_batch_size):
+            xb = torch.from_numpy(X[s:s + sample_batch_size]).to(device)
+            logits.append(model(xb).cpu().numpy())
+    logits = np.concatenate(logits).reshape(k, t)
+
+    return logits.sum(axis=1) / math.log(2.0)
+
+
+def main():
+    rng = np.random.default_rng(SEED)
+    model = load_model(MODEL_PATH, DEVICE)
+
+    master_key = rng.integers(0, 1 << WORD_SIZE, size=4, dtype=np.uint16)
+    round_keys = expand_key(master_key, R_TRAIN + 1)
+    k_last = int(round_keys[-1])
+
+    score_accum = np.zeros(1 << WORD_SIZE, dtype=np.float64)
+
+    for it in range(N_ITER):
+        p0l = rng.integers(0, 1 << WORD_SIZE, size=NUM_PAIRS, dtype=np.uint16)
+        p0r = rng.integers(0, 1 << WORD_SIZE, size=NUM_PAIRS, dtype=np.uint16)
+        p1l = p0l ^ np.uint16(DIFF[0])
+        p1r = p0r ^ np.uint16(DIFF[1])
+
+        c0l, c0r = encrypt((p0l, p0r), round_keys)
+        c1l, c1r = encrypt((p1l, p1r), round_keys)
+
+        for s in range(0, 1 << WORD_SIZE, KEY_BATCH_SIZE):
+            e = min(s + KEY_BATCH_SIZE, 1 << WORD_SIZE)
+            keys = np.arange(s, e, dtype=np.uint16)
+            score_accum[s:e] += score_keys(model, c0l, c0r, c1l, c1r, keys, SAMPLE_BATCH_SIZE, DEVICE)
+
+    score_mean = score_accum / N_ITER
+    ranking = np.argsort(-score_mean)
+    rank_real = int(np.where(ranking == k_last)[0][0]) + 1
+
+    np.savez(
+        OUTPUT_PATH,
+        score_mean=score_mean,
+        ranking=ranking.astype(np.int32),
+        k_last=np.uint16(k_last),
+        rank_real=np.int32(rank_real),
+        round_keys=round_keys,
+    )
+
+    print('k_last =', k_last)
+    print('rank_real =', rank_real)
+    print('saved to', OUTPUT_PATH)
+
+
+if __name__ == '__main__':
+    main()
